@@ -1,0 +1,40 @@
+# Keil build and listing output
+MDK-ARM/Build/
+MDK-ARM/R1/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.map
+*.lnp
+*.dep
+*.lst
+*.log
+*.htm
+*.i
+
+# Keil user and debugger state
+*.uvguix.*
+*.uvoptx
+*.scvd
+MDK-ARM/DebugConfig/
+
+# Keil Assistant / VS Code
+MDK-ARM/.vscode/
+
+# Native test output
+tests/*.exe
+
+# Agent and temporary files
+.agents/
+**/.agents/
+codex_*
+*.tmp
+*.bak
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
