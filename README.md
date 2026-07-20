@@ -1,39 +1,29 @@
 # 2026 Robocon R1 控制系统
 
-> 项目状态：稳定版本
+> 项目状态：结束版本
 
-本项目是面向 2026 Robocon R1 机器人的嵌入式控制工程，使用 STM32G474VETx 作为主控，基于 STM32 HAL 和 FreeRTOS 实现底盘、机械臂、升降机构、夹爪、电机与遥控器控制。
+本项目是面向 2026 Robocon R1 机器人的嵌入式控制工程，使用 STM32G474VETx 作为主控，基于 STM32 HAL 和 FreeRTOS 实现底盘、机械臂、升降机构、夹爪、电机与遥控器控制，本项目没有提供ESP32屏幕端的代码
 
 ## 主要功能
 
-- 底盘运动控制
-- 三关节机械臂控制与预设路径执行
-- 升降机构和夹爪控制
-- M3508 电机闭环控制
-- DM 电机位置与速度控制
-- 遥控器通道解析
-- PID 速度环与角度环控制
-- FreeRTOS 周期任务调度
-- FDCAN 与串口通信
+- 摇杆控制麦轮底盘vx、vy、vw
+- 对3508电机的pid速度环和位置环控制
+- 调试功能能单边升降平台、打印机械臂当前点位
+- 接收遥控器的12位数据再发送到esp32端显示对应的二维码
+- 半自动实现夹取到武器杆到对接的状态转换
+- 半自动实现机械臂对三个高度的KFS的吸取和回收
+- 半自动实现机械臂放置一层高度以及拾取地上KFS
 
-## 硬件平台
+## 工程总览
 
-| 项目 | 配置 |
-| --- | --- |
-| 主控 | STM32G474VETx，LQFP100 |
-| 电机 | M3508、DM 系列电机 |
-| CAN | FDCAN1、FDCAN2、FDCAN3 |
-| 串口 | USART1、USART2、USART3、UART4、UART5 |
-| 遥控器 | RadioMaster 遥控器与接收模块 |
-
-## 软件环境
-
-- STM32CubeMX
-- Keil MDK-ARM
-- Keil Assistant for VS Code（可选）
-- STM32 HAL
-- FreeRTOS
-- CMSIS / CMSIS-DSP
+| 项目   | 配置                                         |
+| ---- | ------------------------------------------ |
+| 主控   | STM32G474VETx，LQFP100，Cortex-M4F，硬件单精度 FPU |
+| 电机   | M3508、DM4310、DM4340P、DM10010L              |
+| CAN  | FDCAN1、FDCAN2、FDCAN3（Chassic CAN-1M）       |
+| 串口   | USART1、USART2、USART3、UART4、UART5           |
+| 遥控器  | RadioMaster 遥控器与接收模块                       |
+| 开发环境 | STM32CubeMX+Keil Assistant for VS Code     |
 
 ## 工程目录
 
@@ -55,43 +45,53 @@ R1/
 
 ## FreeRTOS 任务
 
-| 任务 | 周期 | 用途 |
-| --- | ---: | --- |
-| RemoteTask | 2 ms | 解析遥控器数据 |
-| ArmTask | 5 ms | 机械臂手动控制与自动路径更新 |
-| M3508PidTask | 1 ms | M3508 电机闭环控制 |
-| DebugTask | 500 ms | 周期调试输出 |
-| LiftClawTask | 10 ms | 升降机构与夹爪控制 |
-| ChassisTask | 5 ms | 底盘运动控制 |
-| GpioTask | 20 ms | GPIO 状态控制 |
+| 任务           | 优先级 |     周期 | 用途                      |
+| ------------ | --- | -----: | ----------------------- |
+| RemoteTask   | 4   |   2 ms | 解析遥控器数据                 |
+| ArmTask      | 6   |   5 ms | 机械臂手动控制与自动路径更新          |
+| M3508PidTask | 7   |   1 ms | M3508 电机闭环控制            |
+| DebugTask    | 1   | 500 ms | 周期调试输出，用于临时调试查看某个值      |
+| LiftClawTask | 4   |  10 ms | 升降机构与夹爪控制               |
+| ChassisTask  | 5   |   5 ms | 底盘运动控制，遥控器无值时底盘死锁       |
+| GpioTask     | 2   |  20 ms | GPIO 状态控制吸盘、电磁阀，12位数字发送 |
+工程采用了“目标生成”和“高频执行”分层（有利于降低控制延时导致的控制速度跟不上解算速度的问题，在第一版机器的四舵轮底盘解算中尤为明显）：
 
-周期任务使用 `vTaskDelayUntil()` 按固定时间基准运行，以减少任务周期漂移。
+```text
+遥控DMA回调
+    ↓ 更新 Elrs
+底盘/机械臂/升降夹爪任务
+    ↓ 生成速度或位置目标
+M3508PidTask（1 kHz）
+    ↓ PID计算和CAN电流指令
+电机
+```
 
+所有周期任务均使用 `vTaskDelayUntil()`，相比普通 `vTaskDelay()`，它按照绝对时间基准唤醒，可减少任务执行时间造成的周期漂移
+
+注意：`GpioTask` 与 Timer Service Task 同为优先级2，并且 `GpioTask` 内使用最长100 ms超时的阻塞式串口发送，当前没有软件定时器，所以没有实际冲突；以后如果增加高实时性软件定时器，建议将串口改为 DMA/中断发送或重新调整优先级
 ## 通信配置
 
-- FDCAN1、FDCAN2、FDCAN3 标称波特率均为 1 Mbit/s。
-- USART2 RX 使用 DMA 循环接收。
-- USART1、USART2、USART3、UART4 和 UART5 用于不同外设与调试通信。
+|   总线   |                       设备                        | 引脚Tx/H\|Rx/L |
+| :----: | :---------------------------------------------: | :----------: |
+| FDCAN1 |              麦轮底盘 4 个 M3508，ID1~4               |   PD1、PD0    |
+| FDCAN2 |      机械臂达妙电机：DM4340底座、DM10010L肩部、DM4340肘部       |  PB13、PB12   |
+| FDCAN3 | 升降 M3508 ID5/ID6、夹爪纵向旋转 M3508 ID7、夹爪平面旋转 DM4310 |   PA15、PA8   |
+| USART1 |                printf调试口（115200）                |   PA9、PA10   |
+| USART2 |         ELRS/CRSF 遥控接收机，DMA 接收（420000）          |   PA2、PA3    |
+| USART3 |                距离传感器（未用）（115200）                |  PB10、PE15   |
+| UART4  |              红外发送，只发送（未用）（115200）               |  PC10、PC11   |
+| UART5  |        发送 `clear\n` 和 Code12 文本（115200）         |   PC12、PD2   |
 
-具体引脚、过滤器和外设参数以 [`R1.ioc`](R1.ioc) 为准。
+- 这记录传感器是为了放置升降平台上升或者下降超出范围导致机器损坏，但是后来发现传感器数据容易飘动实际并未使用
 
-## 编译与下载
+- 红外传感器是由于规则限制后续并未使用，但是实测效果非常快速且精准，且不需要过多的解析和验证，逻辑简单，不过正确性并未验证
 
-### 使用 Keil MDK
+- 具体引脚、过滤器和外设参数请参考 [`R1.ioc`](R1.ioc) 为准
 
-1. 安装 Keil MDK、STM32G4 Device Pack 及工程所需 CMSIS 组件。
-2. 打开 `MDK-ARM/R1.uvprojx`。
-3. 选择 `R1` Target。
-4. 执行 Build/Rebuild。
-5. 根据实际调试器和硬件连接配置下载选项，然后烧录程序。
-
-### 使用 STM32CubeMX
-
-使用 STM32CubeMX 打开根目录下的 `R1.ioc`，可以查看或调整时钟、GPIO、FDCAN、UART、DMA 和 FreeRTOS 配置。
-
-重新生成代码前，请确认自定义代码位于 CubeMX 用户代码区域或独立源码目录中。
 
 ## RadioMaster 遥控器脚本
+
+由于本工程需要遥控器发送12位数字到主控，再由主控通过串口传输到ESP32S3的屏幕后显示对应的二维码，所以自己编写了一个遥控器脚本
 
 遥控器工具位于：
 
@@ -99,42 +99,25 @@ R1/
 Tools/RadioMaster/code12.lua
 ```
 
-将其复制到 RadioMaster 遥控器 SD 卡：
+用typec线与遥控器顶端连接后可访问遥控器中的sd存储卡，将其复制到 RadioMaster 遥控器 SD 卡即可：
 
 ```text
 /SCRIPTS/TOOLS/code12.lua
 ```
 
-该工具通过 CH13～CH16 传递 12 位编码数据。按键、开关和通道配置说明请查看 Lua 文件开头的注释。
-
-## 测试
-
-PowerShell 静态回归检查：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\arm_task_checks.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\arm_height_paths_test.ps1
-```
-
-使用 MinGW GCC 运行夹爪 DM 电机主机侧测试：
-
-```powershell
-gcc -std=c11 -Wall -Wextra -Werror .\tests\claw_dm_step_test.c -o .\tests\claw_dm_step_test.exe
-.\tests\claw_dm_step_test.exe
-```
+该工具通过 CH13～CH16 传递 12 位编码数据，按键、开关和通道配置说明请查看 Lua 文件开头的注释
 
 ## 硬件资料
 
 - [STM32G474 控制板原理图](docs/schematic_G474.pdf)
-
+- [ESP32S3屏幕原理图](docs/schematic_ESP32S3Screen.pdf)
+- [R1_遥控器手册](docs/R1 遥控器控制手册.md)
 ## 安全注意事项
 
-- 上电前确认电源电压、极性和公共地连接正确。
-- 使能电机前确认 CAN 总线、电机 ID 和控制方向。
-- 首次调试机械臂、升降和夹爪时应限制速度，并预留紧急断电方式。
-- 修改 PID、关节目标或自动路径后，应先在无负载或安全支撑条件下验证。
-- 运行自动动作前确认机械结构周围没有人员和障碍物。
-
+- 上电前确认电源电压、极性和公共地连接正确，以及有无电源线松动的情况，放置短接导致主控板烧毁
+- 首次调试机械臂、升降和夹爪时应限制速度，并预留紧急断电方式
+- 拨杆拨到B3进入到机械臂模式的时候机械臂会回到事先设置的机械零位，过程非常危险，严禁再机械臂在半空中初始化
+- 控制升降时要多注意上下限，现未启用距离传感器保护升降平台需要人为注意
 ## 许可证
 
-本项目使用 MIT License，详情参见 [LICENSE](LICENSE)。
+本项目使用 MIT License，详情参见 [LICENSE](LICENSE)
