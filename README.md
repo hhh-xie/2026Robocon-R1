@@ -47,7 +47,7 @@ R1/
 
 | 任务           | 优先级 |     周期 | 用途                      |
 | ------------ | --- | -----: | ----------------------- |
-| RemoteTask   | 4   |   2 ms | 解析遥控器数据                 |
+| RemoteTask   | 4   | 通知唤醒 | 环形区取数、CRSF 组帧并发布最新状态队列 |
 | ArmTask      | 6   |   5 ms | 机械臂手动控制与自动路径更新          |
 | M3508PidTask | 7   |   1 ms | M3508 电机闭环控制            |
 | DebugTask    | 1   | 500 ms | 周期调试输出，用于临时调试查看某个值      |
@@ -58,8 +58,10 @@ R1/
 工程采用了“目标生成”和“高频执行”分层（有利于降低控制延时导致的控制速度跟不上解算速度的问题，在第一版机器的四舵轮底盘解算中尤为明显）：
 
 ```text
-遥控DMA回调
-    ↓ 更新 Elrs
+遥控 DMA 回调
+    ↓ 软件环形缓冲区 + 任务通知
+RemoteTask
+    ↓ 组帧、CRC、解包并发布最新状态队列
 底盘/机械臂/升降夹爪任务
     ↓ 生成速度或位置目标
 M3508PidTask（1 kHz）
@@ -67,7 +69,7 @@ M3508PidTask（1 kHz）
 电机
 ```
 
-所有周期任务均使用 `vTaskDelayUntil()`，相比普通 `vTaskDelay()`，它按照绝对时间基准唤醒，可减少任务执行时间造成的周期漂移
+除事件驱动的 RemoteTask 外，所有周期任务均使用 `vTaskDelayUntil()`，相比普通 `vTaskDelay()`，它按照绝对时间基准唤醒，可减少任务执行时间造成的周期漂移
 
 注意：`GpioTask` 与 Timer Service Task 同为优先级2，并且 `GpioTask` 内使用最长100 ms超时的阻塞式串口发送，当前没有软件定时器，所以没有实际冲突；以后如果增加高实时性软件定时器，建议将串口改为 DMA/中断发送或重新调整优先级
 ## 通信配置
@@ -90,6 +92,38 @@ M3508PidTask（1 kHz）
 - 具体引脚、过滤器和外设参数请参考 [`R1.ioc`](R1.ioc) 为准
 
 
+## 遥控器接收架构
+
+遥控接收采用“循环 DMA → 软件环形缓冲区 → 任务组帧与解析 → 最新状态队列”的结构，不使用 Stream Buffer。
+
+```text
+USART2（420000，8N1）
+    ↓ DMA 持续接收，128 字节循环区
+IDLE / HT / TC 中断
+    ↓ 根据当前 DMA 写位置，仅转存新增字节
+软件环形缓冲区（512 字节，保留一个空位）
+    ↓ vTaskNotifyGiveFromISR()
+RemoteTask
+    ↓ 寻找帧头、按长度组帧、CRC8 校验、16 通道解包和 Code12 处理
+长度为 1 的遥控状态队列（xQueueOverwrite）
+    ↓ RC_GetSnapshot() 内部使用 xQueuePeek，不取走数据
+底盘 / 机械臂 / 升降 / 夹爪 / GPIO 任务
+```
+
+- `RemoteTask` 优先级保持 4，栈增加到 512 个 StackType_t。通过 `ulTaskNotifyTake()` 阻塞等待；10 ms 超时用于接收启动失败后的重试，不代表解析周期。
+- 中断只转存数据并通知任务，不组帧、不计算 CRC，也不重新启动正常运行的循环 DMA。保留 HT/TC，使持续输入没有 IDLE 时仍有数据处理机会。
+- USART2 和 DMA1_Channel1 抢占优先级均为 5，与 FreeRTOS 的中断 API 限制一致，同时避免两个接收回调互相抢占。
+- 组帧状态跨多次通知保留，可以处理半帧和连续多帧；长度错误或 CRC 错误后逐字节重新同步帧头。
+- 队列发布的是通过 CRC 的**解析后状态**，包含通道、Code12、`frame_seq` 和 `last_valid_tick`。各消费者每轮复制一份完整快照；`Elrs` 仅保留为调试镜像。
+- 队列只保存最新状态，多个任务必须使用 `RC_GetSnapshot()` / `xQueuePeek()`，不能竞争调用 `xQueueReceive()`。它不是按键事件队列，短按发生在两次业务采样之间时仍可能被漏过。
+- 环形缓冲区满时停止投递这一段不连续数据，由任务清空积压和半帧后重新同步。UART/DMA 错误由回调记录并通知，停止、清理和重新启动接收由任务执行。
+
+调试时可观察 `rc_parse_ok_count`、`rc_crc_fail_count`、`rc_ring_high_water`、`rc_ring_overflow_count`、`rc_dropped_byte_count` 和 `rc_recovery_count`。`rc_dropped_byte_count` 统计中断未能投递的字节，不包含任务恢复时清空的积压数据。
+
+满速连续输入下，128 字节 DMA 区约 3.05 ms 写满一圈，HT 间隔约 1.52 ms；中断必须及时服务，长时间屏蔽中断仍可能导致 DMA 覆盖。上板需测量中断响应、任务栈余量、队列状态更新延迟及对 1 ms 电机任务的影响。
+
+本次只调整接收与任务间数据传递，原遥控通道映射和动作逻辑保持不变。当前没有遥控失联自动停车逻辑；通信停止后仍保留最后一次状态，`last_valid_tick` 仅提供后续检测依据。
+
 ## RadioMaster 遥控器脚本
 
 由于本工程需要遥控器发送12位数字到主控，再由主控通过串口传输到ESP32S3的屏幕后显示对应的二维码，所以自己编写了一个遥控器脚本
@@ -107,6 +141,19 @@ Tools/RadioMaster/code12.lua
 ```
 
 该工具通过 CH13～CH16 传递 12 位编码数据，按键、开关和通道配置说明请查看 Lua 文件开头的注释
+
+## 测试
+
+遥控接收主机测试使用 HAL/FreeRTOS 测试替身驱动实际 `remote_control.c`：
+
+```powershell
+gcc -std=c11 -Wall -Wextra -Werror -Itests/host/remote_rx_stubs tests/remote_rx_test.c -o tests/remote_rx_test.exe
+.\tests\remote_rx_test.exe
+```
+
+覆盖分包、连续多帧、DMA 与软件环形区回绕、重复/滞后回调、CRC 错误重同步、Code12 解码、多消费者 Peek、最新状态覆盖、环形区溢出以及 UART 错误恢复。测试同时断言 ISR 不执行解析和队列发布、正常接收不重复启动 DMA。
+
+主机测试验证逻辑；中断时序、真实 UART 错误和机械动作仍需在开发板上验证。完整固件使用 `MDK-ARM/R1.uvprojx` 编译。
 
 ## 硬件资料
 

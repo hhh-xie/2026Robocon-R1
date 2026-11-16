@@ -6,10 +6,10 @@
 #define min_pos (-3530332.0f * 19.0f)
 #define max_pos (3530332.0f * 19.0f)
 
-#define RC_Value Elrs.ch[9]
+#define RC_Value remote->ch[9]
 #define RC_Control_Value 400
-#define RC_Debug_Value1 Elrs.ch[2]
-#define RC_Debug_Value2 Elrs.ch[1]
+#define RC_Debug_Value1 remote->ch[2]
+#define RC_Debug_Value2 remote->ch[1]
 
 #define LIFT_SENSOR_MAX_VALUE 305U
 #define LIFT_SENSOR_MIN_VALUE 70U
@@ -45,7 +45,7 @@ static float Lift_Limit_Delta(float delta)
     return delta;
 }
 
-void Lift_Motor_Control(void)
+void Lift_Motor_Control(const ELRS_t *remote)
 {
     if ((id5_position_initialized == 0U) && (motor_3508.ID5.cnt != 0))
     {
@@ -71,14 +71,14 @@ void Lift_Motor_Control(void)
         return;
     }
 
-    if ((Elrs.ch[7] != 2) &&
+    if ((remote->ch[7] != 2) &&
         ((RC_Value > RC_Control_Value) || (RC_Value < -RC_Control_Value)))
     {
         float lift_delta = (RC_Value > 0) ? STEP : -STEP;
         lift_current_target += Lift_Limit_Delta(lift_delta);
     }
 
-    if (Elrs.ch[7] == 2)
+    if (remote->ch[7] == 2)
     {
         if ((RC_Debug_Value1 > RC_Control_Value) || (RC_Debug_Value1 < -RC_Control_Value))
         {

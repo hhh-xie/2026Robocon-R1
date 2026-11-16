@@ -1,14 +1,17 @@
 #include "arm_motor.h"
 
 /* ============================== 遥控器通道映射 ==============================
- * Elrs.ch[] 中的原始 CRSF 通道已经在 remote_control.c 中完成了摇杆居中、
+ * 队列快照中的原始 CRSF 通道已经在 remote_control.c 中完成了摇杆居中、
  * 三段开关离散化和按键 0/1 化。这里用有业务含义的名字代替通道下标，
  * 便于后续阅读机械臂模式、预设动作和示教功能的判定条件。
  */
-#define ARM_MODE_VALUE Elrs.ch[7]
-#define ARM_TEACH_C_VALUE Elrs.ch[8]
-#define ARM_TEACH_F_VALUE Elrs.ch[6]
-#define ARM_TEACH_PRINT_KEY Elrs.ch[4]
+/* 仅 ArmTask 更新和使用，避免一轮控制混用多帧通道。 */
+static ELRS_t arm_remote;
+
+#define ARM_MODE_VALUE arm_remote.ch[7]
+#define ARM_TEACH_C_VALUE arm_remote.ch[8]
+#define ARM_TEACH_F_VALUE arm_remote.ch[6]
+#define ARM_TEACH_PRINT_KEY arm_remote.ch[4]
 
 /* 三段开关和按键在解析后的有效值。机械臂手动模式由 B 通道值 3 选中。 */
 #define ARM_MODE_ACTIVE_VALUE 3
@@ -17,10 +20,10 @@
 #define ARM_TEACH_KEY_PRESSED 1
 
 /* A 键用于“吸取/执行”，D 键用于“回收/释放”；F、C 三段开关选择动作。 */
-#define ARM_PICK_KEY_VALUE Elrs.ch[4]
-#define ARM_RECYCLE_KEY_VALUE Elrs.ch[10]
-#define ARM_PRESET_F_MODE_VALUE Elrs.ch[6]
-#define ARM_PRESET_C_MODE_VALUE Elrs.ch[8]
+#define ARM_PICK_KEY_VALUE arm_remote.ch[4]
+#define ARM_RECYCLE_KEY_VALUE arm_remote.ch[10]
+#define ARM_PRESET_F_MODE_VALUE arm_remote.ch[6]
+#define ARM_PRESET_C_MODE_VALUE arm_remote.ch[8]
 
 /* 三段开关经过 Data_Change() 后只会得到 1、2、3。 */
 #define ARM_SWITCH_POS_1 1
@@ -644,6 +647,11 @@ static void Arm_Run_Active_Path_Task(void)
     }
 }
 
+void Arm_Remote_Update(const ELRS_t *remote)
+{
+    arm_remote = *remote;
+}
+
 /* 依次给底座、肩部、肘部三个达妙电机发送 MIT 模式启动命令。 */
 void Arm_Motor_Start(void)
 {
@@ -739,10 +747,13 @@ void Arm_RC_Control(int16_t x, int16_t y, int16_t z)
     Arm_Motor_Control();
 }
 
-/* 从全局遥控结构读取右 X、右 Y、左 Y 三个通道，调用旧版整数控制接口。 */
+/* 从队列快照读取右 X、右 Y、左 Y 三个通道，调用旧版整数控制接口。 */
 void Arm_RC_Control_From_Remote(void)
 {
-    Arm_RC_Control(Elrs.ch[0], Elrs.ch[1], Elrs.ch[2]);
+    ELRS_t remote;
+    RC_GetSnapshot(&remote);
+    Arm_Remote_Update(&remote);
+    Arm_RC_Control(remote.ch[0], remote.ch[1], remote.ch[2]);
 }
 
 /* 机械臂主控制入口，由 FreeRTOS 的 ArmTask 每 5 ms 调用一次。

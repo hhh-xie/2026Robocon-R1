@@ -85,7 +85,7 @@ $checks = @(
     },
     @{
         Name = 'B1 F2 C3 bypasses QR branch and controls suction before claw'
-        Pass = (($rtosText -match 'ch6\s*=\s*Elrs\.ch\[6\]') -and
+        Pass = (($rtosText -match 'ch6\s*=\s*remote\.ch\[6\]') -and
                 ($rtosText -match '\(ch7\s*==\s*1\)\s*&&\s*\(ch6\s*==\s*2\)\s*&&\s*\(ch8\s*==\s*3\)') -and
                 ($rtosText -match 'place_suction_control_selected') -and
                 ($rtosText -match 'else\s+if\s*\(\s*\(ch7\s*!=\s*3\)\s*&&\s*\(ch5\s*==\s*3\)'))

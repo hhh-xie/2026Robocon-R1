@@ -3,7 +3,7 @@
 
 /* ============================== FreeRTOS 任务配置 ==============================
  * 数字越大的任务优先级越高；任务栈大小的单位是 StackType_t，而不是字节。
- * 所有周期任务均使用 vTaskDelayUntil()，以固定时间基准运行，减少周期漂移。
+ * 遥控任务由通知唤醒；其他周期任务均使用 vTaskDelayUntil()，以固定时间基准运行，减少周期漂移。
  */
 
 /* 启动任务：只负责创建其他业务任务，完成后立即删除自身。 */
@@ -12,10 +12,10 @@
 TaskHandle_t start_task_handle;
 static void StartTask(void *pvParameters);
 
-/* 遥控接收任务：每 2 ms 检查/维护 CRSF 串口 DMA 接收。 */
-#define REMOTE_TASK_STACK       256
+/* 遥控任务：通知唤醒后读取软件环形区、组帧并发布最新状态队列。 */
+#define REMOTE_TASK_STACK       512
 #define REMOTE_TASK_PRIORITY    4
-#define REMOTE_TASK_PERIOD_MS   2U
+#define REMOTE_TASK_RETRY_MS    10U
 TaskHandle_t remote_task_handle;
 static void RemoteTask(void *pvParameters);
 
@@ -143,22 +143,21 @@ static void StartTask(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-/* 遥控接收维护任务：确保 USART2 DMA 始终处于接收状态。 */
+/* DMA 接收一次启动，ISR 只搬字节；组帧和 CRC 全部在本任务执行。 */
 static void RemoteTask(void *pvParameters)
 {
-    /* 保存绝对唤醒基准，使任务始终按 2 ms 周期运行。 */
-    TickType_t last_wake_time = xTaskGetTickCount();
-
     (void)pvParameters;
-
+    if (RC_Init(xTaskGetCurrentTaskHandle()) != pdPASS)
+    {
+        Error_Handler();
+    }
     for (;;)
     {
-        /* RC_Receive() 负责启动/维护 USART2 的空闲中断 DMA 接收；
-         * 实际 CRSF 字节解析在串口 DMA 回调中完成并更新全局 Elrs。
-         */
         RC_Receive();
-        /* 相对上一次计划唤醒时刻延时，避免循环执行时间累积成周期漂移。 */
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(REMOTE_TASK_PERIOD_MS));
+        /* 通知会被保留，不会丢失“处理结束到进入等待之间”到达的事件。
+         * 10 ms 超时仅用于接收启动失败后的重试，不是遥控解析周期。
+         */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(REMOTE_TASK_RETRY_MS));
     }
 }
 
@@ -168,13 +167,16 @@ static void ArmTask(void *pvParameters)
     TickType_t last_wake_time = xTaskGetTickCount();
     /* 记录上一周期是否处于 B=3，用于只在进入模式的瞬间执行一次初始化。 */
     uint8_t arm_mode_last = 0U;
+    ELRS_t remote;
 
     (void)pvParameters;
 
     for (;;)
     {
-        /* remote_control.c 将 B 三段开关解析到 Elrs.ch[7]；值 3 代表机械臂模式。 */
-        if(Elrs.ch[7] == 3)
+        /* Peek 不移除状态；同一次循环的机械臂输入来自同一帧。 */
+        RC_GetSnapshot(&remote);
+        Arm_Remote_Update(&remote);
+        if(remote.ch[7] == 3)
         {
             /* 从其他模式首次切入时，重新使能电机并同步路径和按键历史状态。 */
             if(arm_mode_last == 0U)
@@ -186,7 +188,7 @@ static void ArmTask(void *pvParameters)
             /* 右 X 控制底座、左 Y 控制肩部、右 Y 控制肘部；
              * /80 将遥控通道缩放到机械臂浮点摇杆范围，负号修正安装方向。
              */
-            Arm_Angle_Control(Elrs.ch[0] / 80.0f, -Elrs.ch[2] / 80.0f, -Elrs.ch[1] / 80.0f);
+            Arm_Angle_Control(remote.ch[0] / 80.0f, -remote.ch[2] / 80.0f, -remote.ch[1] / 80.0f);
         }
         else
         {
@@ -239,19 +241,21 @@ static void DebugTask(void *pvParameters)
     }
 }
 
-/* 升降与夹爪目标更新任务；两个控制函数共享 10 ms 的人机控制周期。 */
+/* 升降与夹爪共享一份队列快照和 10 ms 的人机控制周期。 */
 static void LiftClawTask(void *pvParameters)
 {
+    ELRS_t remote;
     TickType_t last_wake_time = xTaskGetTickCount();
 
     (void)pvParameters;
 
     for (;;)
     {
+        RC_GetSnapshot(&remote);
         /* 根据遥控通道、限位传感器等信息更新升降机构目标。 */
-        Lift_Motor_Control();
+        Lift_Motor_Control(&remote);
         /* 更新夹爪 3508/达妙电机目标及自动定位逻辑。 */
-        Claw_Motor_Control();
+        Claw_Motor_Control(&remote);
         vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LIFT_CLAW_TASK_PERIOD_MS));
     }
 }
@@ -260,6 +264,7 @@ static void LiftClawTask(void *pvParameters)
 static void ChassisTask(void *pvParameters)
 {
     /* ch0=右 X（旋转），ch2=左 Y（前后），ch3=左 X（横移），ch7=B 模式开关。 */
+    ELRS_t remote;
     int16_t ch0;
     int16_t ch2;
     int16_t ch3;
@@ -272,13 +277,11 @@ static void ChassisTask(void *pvParameters)
 
     for (;;)
     {
-        /* Elrs 由遥控 DMA 回调异步更新，临界区保证四个通道来自同一份快照。 */
-        taskENTER_CRITICAL();
-        ch0 = Elrs.ch[0];
-        ch2 = Elrs.ch[2];
-        ch3 = Elrs.ch[3];
-        ch7 = Elrs.ch[7];
-        taskEXIT_CRITICAL();
+        RC_GetSnapshot(&remote);
+        ch0 = remote.ch[0];
+        ch2 = remote.ch[2];
+        ch3 = remote.ch[3];
+        ch7 = remote.ch[7];
         /* B=1 选择底盘模式；其他模式下底盘目标始终清零。 */
         if(ch7 == 1)
         {
@@ -352,6 +355,7 @@ static uint8_t Code12_Pack_4Digits(const uint8_t *digits)
  */
 static void GpioTask(void *pvParameters)
 {
+    ELRS_t remote;
     TickType_t last_wake_time = xTaskGetTickCount();
     /* 本周期使用的遥控通道快照：A、E、F、B、C、D。 */
     int16_t ch4;
@@ -377,15 +381,14 @@ static void GpioTask(void *pvParameters)
 
     for (;;)
     {
-        /* 遥控回调可能异步更新 Elrs；临界区内一次性复制本任务需要的通道。 */
-        taskENTER_CRITICAL();
-        ch4 = Elrs.ch[4];
-        ch5 = Elrs.ch[5];
-        ch6 = Elrs.ch[6];
-        ch7 = Elrs.ch[7];
-        ch8 = Elrs.ch[8];
-        ch10 = Elrs.ch[10]; 
-        taskEXIT_CRITICAL();
+        /* 通道和 Code12 均来自这一份队列快照。 */
+        RC_GetSnapshot(&remote);
+        ch4 = remote.ch[4];
+        ch5 = remote.ch[5];
+        ch6 = remote.ch[6];
+        ch7 = remote.ch[7];
+        ch8 = remote.ch[8];
+        ch10 = remote.ch[10];
 
         /* 该特殊组合与下面的 B=1、C=3 Code12 发送条件重叠，因此单独排除。 */
         place_suction_control_selected = ((ch7 == 1) && (ch6 == 2) && (ch8 == 3)) ? 1U : 0U;
@@ -396,10 +399,8 @@ static void GpioTask(void *pvParameters)
             /* 保持在同一组合时只发送一次，离开后再次进入才允许重发。 */
             if(code12_ir_send_last == 0U)
             {
-                /* Code12 由遥控解析回调更新，复制时同样需要临界区保护。 */
-                taskENTER_CRITICAL();
-                memcpy(code12, (const void *)Elrs.code12, sizeof(code12));
-                taskEXIT_CRITICAL();
+                /* 使用与模式开关相同快照中的 Code12。 */
+                memcpy(code12, remote.code12, sizeof(code12));
 
                 /* 16 字节帧先整体清零，前 3 字节分别打包 4 个 Code12 数字。 */
                 memset(code12_ir_msg, 0, sizeof(code12_ir_msg));
@@ -434,9 +435,7 @@ static void GpioTask(void *pvParameters)
             /* D 键按下沿复制并发送当前 Code12。 */
             if((ch10 == 1) && (code12_send_last == 0U))
             {
-                taskENTER_CRITICAL();
-                memcpy(code12, (const void *)Elrs.code12, sizeof(code12));
-                taskEXIT_CRITICAL();
+                memcpy(code12, remote.code12, sizeof(code12));
 
                 /* 0～3 数字转换成 ASCII 字符，末尾添加换行形成 13 字节文本帧。 */
                 for(uint8_t i = 0U; i < 12U; i++)

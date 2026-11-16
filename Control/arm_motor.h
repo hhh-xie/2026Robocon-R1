@@ -72,6 +72,7 @@ typedef struct
 #define ARM_BASE_HEIGHT 0.0f
 #define ARM_IK_ELBOW_DIR 1.0f
 
+void Arm_Remote_Update(const ELRS_t *remote);
 void Arm_Motor_Init(void);
 void Arm_Motor_Start(void);
 void Arm_Motor_Stop(void);

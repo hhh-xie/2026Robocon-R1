@@ -7,6 +7,6 @@
 #include "pid.h"
 #include "usart.h"
 
-void Lift_Motor_Control(void);
+void Lift_Motor_Control(const ELRS_t *remote);
 
 #endif

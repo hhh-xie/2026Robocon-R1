@@ -7,6 +7,6 @@
 #include "math.h"
 #include "lift_motor.h"
 
-void Claw_Motor_Control(void);
+void Claw_Motor_Control(const ELRS_t *remote);
 
 #endif

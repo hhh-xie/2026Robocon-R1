@@ -17,10 +17,10 @@
 #define DM4310_Pos2 (1.18f)
 #define DM4310_Pos3 (3.5f)                //1、2区3.5f       
 
-#define CLAW_DM_BUTTON Elrs.ch[6]
-#define CLAW_ARM_MODE_VALUE Elrs.ch[7]
-#define CLAW_CH8_VALUE Elrs.ch[8]
-#define CLAW_RC_VALUE Elrs.ch[11]
+#define CLAW_DM_BUTTON remote->ch[6]
+#define CLAW_ARM_MODE_VALUE remote->ch[7]
+#define CLAW_CH8_VALUE remote->ch[8]
+#define CLAW_RC_VALUE remote->ch[11]
 #define CLAW_ARM_MODE_ACTIVE_VALUE 3
 #define CLAW_CH8_AUTO_VALUE 2
 #define CLAW_RC_CONTROL_VALUE 400
@@ -74,9 +74,9 @@ static void Claw_Set_Target_Ecd(float target_ecd)
     claw_current_offset = Claw_Limit_Float(claw_target_ecd - claw_home_ecd,CLAW_MIN_OFFSET,CLAW_MAX_OFFSET);
 }
 
-static void Claw_Update_DM_Target_From_Button(uint8_t button)
+static void Claw_Update_DM_Target_From_Button(uint8_t button, const ELRS_t *remote)
 {
-    if(Elrs.ch[7] == CLAW_ARM_MODE_ACTIVE_VALUE)
+    if(remote->ch[7] == CLAW_ARM_MODE_ACTIVE_VALUE)
     {
         return;
     }
@@ -97,7 +97,7 @@ static void Claw_Update_DM_Target_From_Button(uint8_t button)
     }
 }
 
-static void Claw_DM_Button_Control(void)
+static void Claw_DM_Button_Control(const ELRS_t *remote)
 {
     uint8_t dm_button = (uint8_t)CLAW_DM_BUTTON;
     uint8_t arm_mode = (uint8_t)CLAW_ARM_MODE_VALUE;
@@ -115,7 +115,7 @@ static void Claw_DM_Button_Control(void)
     }
     else if ((claw_dm_button_last == 0xFFU) || (dm_button != claw_dm_button_last))
     {
-        Claw_Update_DM_Target_From_Button(dm_button);
+        Claw_Update_DM_Target_From_Button(dm_button, remote);
         claw_dm_button_last = dm_button;
     }
 
@@ -131,7 +131,7 @@ static void Claw_DM_Button_Control(void)
 }
 
 
-void Claw_Motor_Control(void)
+void Claw_Motor_Control(const ELRS_t *remote)
 {
     if(dm4310_init_count < 2U)
     {
@@ -139,7 +139,7 @@ void Claw_Motor_Control(void)
         dm4310_init_count++;
     }
 
-    Claw_DM_Button_Control();
+    Claw_DM_Button_Control(remote);
 
     if ((claw_position_initialized == 0U) && (motor_3508.ID7.cnt != 0))
     {

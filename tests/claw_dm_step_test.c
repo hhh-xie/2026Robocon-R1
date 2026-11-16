@@ -10,6 +10,7 @@ typedef struct
 {
     int16_t ch[16];
 } RemoteControlStub;
+typedef RemoteControlStub ELRS_t;
 
 typedef struct
 {
@@ -85,7 +86,7 @@ static void Test_Forward_Command_Uses_One_Step(void)
     Reset_DM_Control();
     Elrs.ch[6] = 2;
 
-    Claw_DM_Button_Control();
+    Claw_DM_Button_Control(&Elrs);
 
     Assert_Float_Near(transmitted_position, DM4310_Pos1 + CLAW_DM_POSITION_STEP);
     Assert_Float_Near(transmitted_speed, 5.0f);
@@ -112,7 +113,7 @@ static void Test_Ch8_Auto_Also_Selects_DM_Pos2(void)
     claw_target_ecd = CLAW_HOME_ECD;
     Elrs.ch[8] = CLAW_CH8_AUTO_VALUE;
 
-    Claw_Motor_Control();
+    Claw_Motor_Control(&Elrs);
 
     assert(claw_ch8_auto_active != 0U);
     assert(claw_dm_target_valid != 0U);
